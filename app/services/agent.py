@@ -5,7 +5,7 @@ Refactored to support shared WhatsApp + Telegram flows with simple Supabase pers
 from __future__ import annotations
 
 import json
-import re
+import logging
 import uuid
 from typing import Annotated, Any, Literal, Optional
 
@@ -19,10 +19,28 @@ from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
 from app.core.config import get_settings
+from app.services.prompt import (
+    FALLBACK_NO_LLM_DEFAULT,
+    FALLBACK_NO_LLM_SUGGEST_VISIT,
+    FALLBACK_RESPOND_LLM_ERROR,
+    GROUNDED_REPLY_BUDGET_RELAXED_INTRO,
+    GROUNDED_REPLY_DB_NUMBERS_INTRO,
+    GROUNDED_REPLY_FOOTER,
+    HANDOFF_USER_MESSAGE,
+    NO_INVENTORY_INTRO,
+    NO_INVENTORY_OUTRO,
+    respond_system_content,
+    triage_classifier_system_content,
+    triage_human_content,
+)
 
-SYSTEM_REAL_ESTATE = """You are EstateAgent AI, a professional real estate assistant for an Indian broker.
-You qualify buyers and sellers, never invent property prices or addresses, and offer a human handoff when unsure.
-Reply in the user's language, keep messages concise, and optimize for WhatsApp/Telegram chat."""
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _stderr_handler = logging.StreamHandler()
+    _stderr_handler.setFormatter(logging.Formatter("%(levelname)s | %(name)s | %(message)s"))
+    logger.addHandler(_stderr_handler)
+logger.propagate = False
 
 NEXT_ACTION_LITERAL = Literal[
     "qualify",
@@ -40,6 +58,10 @@ class TriageDecision(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     lead_delta: dict[str, Any] = Field(default_factory=dict)
     human_handoff_requested: bool = False
+    refresh_property_inventory: bool = Field(
+        default=False,
+        description="User asked prices/details while bhk or location exists in lead; force DB re-fetch.",
+    )
 
 
 class AgentState(TypedDict, total=False):
@@ -51,6 +73,7 @@ class AgentState(TypedDict, total=False):
     profile_name: str
     lead_info: dict[str, Any]
     properties_matched: list[dict[str, Any]]
+    property_match_meta: dict[str, Any]
     calendar_slots: list[str]
     next_action: str
     confidence: float
@@ -93,69 +116,40 @@ def _chat() -> Optional[BaseChatModel]:
     )
 
 
-def _extract_budget_max_inr(text: str) -> Optional[int]:
-    cleaned = text.lower().replace(",", "").strip()
-    priority_patterns = [
-        r"(?:under|below|max|budget|upto|up to)\s*(\d+(?:\.\d+)?)\s*(cr|crore|crores|lakh|lakhs|lac|lacs)",
-        r"(\d+(?:\.\d+)?)\s*(cr|crore|crores|lakh|lakhs|lac|lacs)",
-        r"(?:under|below|max|budget|upto|up to)\s*(\d{6,})",
-    ]
-    for pattern in priority_patterns:
-        match = re.search(pattern, cleaned)
-        if not match:
-            continue
-        value = float(match.group(1))
-        unit = (match.group(2) or "").lower() if len(match.groups()) > 1 else ""
-        if unit in {"cr", "crore", "crores"}:
-            return int(value * 10_000_000)
-        if unit in {"lakh", "lakhs", "lac", "lacs"}:
-            return int(value * 100_000)
-        if value >= 1_000_000:
-            return int(value)
-    return None
+def _normalize_lead_delta_value(key: str, value: Any) -> Any:
+    if value is None:
+        return None
+    if key == "bhk" and isinstance(value, (int, float, str)):
+        try:
+            return int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return value
+    if key == "budget_max_inr" and isinstance(value, (int, float, str)):
+        try:
+            return int(float(str(value).replace(",", "").strip()))
+        except (TypeError, ValueError):
+            return value
+    return value
 
 
-def _extract_location(text: str) -> str:
-    match = re.search(r"\b(?:in|at|near)\s+([a-z][a-z\s-]{2,40})", text.lower())
-    if not match:
-        return ""
-    location = re.split(r"\b(?:under|below|for|with|and|budget)\b", match.group(1))[0]
-    return location.strip(" ,.-").title()
+def _apply_lead_delta(lead: dict[str, Any], delta: dict[str, Any] | None) -> None:
+    """Merge model output: JSON null clears a key; omit key to keep prior value."""
+    for key, raw in (delta or {}).items():
+        value = _normalize_lead_delta_value(key, raw)
+        if value is None:
+            lead.pop(key, None)
+        elif value != "":
+            lead[key] = value
 
 
-def _extract_bhk(text: str) -> Optional[int]:
-    match = re.search(r"\b(\d+)\s*bhk\b", text.lower())
-    return int(match.group(1)) if match else None
-
-
-def _extract_lead_delta(text: str, existing: dict[str, Any]) -> dict[str, Any]:
-    lowered = text.lower()
-    lead_delta: dict[str, Any] = {}
-
-    bhk = _extract_bhk(text)
-    if bhk is not None:
-        lead_delta["bhk"] = bhk
-
-    budget_max_inr = _extract_budget_max_inr(text)
-    if budget_max_inr is not None:
-        lead_delta["budget_max_inr"] = budget_max_inr
-
-    location = _extract_location(text)
-    if location:
-        lead_delta["location"] = location
-
-    if any(word in lowered for word in ("buy", "buyer", "purchase", "looking for", "rent")):
-        lead_delta["intent"] = "buyer"
-    if any(word in lowered for word in ("sell", "seller", "listing my property")):
-        lead_delta["intent"] = "seller"
-
-    if any(word in lowered for word in ("immediate", "this week", "asap", "urgent")):
-        lead_delta["timeline"] = "immediate"
-
-    if "budget_max_inr" not in lead_delta and existing.get("budget_max_inr"):
-        lead_delta["budget_max_inr"] = existing["budget_max_inr"]
-
-    return lead_delta
+def _no_llm_triage_decision() -> TriageDecision:
+    return TriageDecision(
+        next_action="qualify",
+        confidence=0.0,
+        lead_delta={},
+        human_handoff_requested=False,
+        refresh_property_inventory=False,
+    )
 
 
 def _build_summary(channel: str, profile_name: str, lead_info: dict[str, Any], next_action: str) -> str:
@@ -187,10 +181,62 @@ def _format_property_preview(properties: list[dict[str, Any]]) -> str:
         bits = [title, location]
         if bhk:
             bits.append(f"{bhk} BHK")
-        if price:
-            bits.append(f"INR {int(price):,}")
+        if price is not None and price != "":
+            bits.append(f"INR {_as_int_price(price):,}")
         lines.append(f"{idx}. " + " | ".join(bits))
     return "\n".join(lines)
+
+
+def _as_int_price(value: Any) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _format_grounded_property_reply(
+    properties: list[dict[str, Any]],
+    lead: dict[str, Any],
+    *,
+    budget_relaxed: bool,
+) -> str:
+    """Reply built only from DB rows — no LLM, no approximate prices."""
+    lines: list[str] = []
+    if budget_relaxed and lead.get("budget_max_inr"):
+        lines.append(GROUNDED_REPLY_BUDGET_RELAXED_INTRO)
+    else:
+        lines.append(GROUNDED_REPLY_DB_NUMBERS_INTRO)
+
+    for idx, item in enumerate(properties[:5], start=1):
+        title = str(item.get("title") or f"Listing {idx}").strip()
+        location = str(item.get("location") or "").strip()
+        bhk = item.get("bhk")
+        price = item.get("price_inr")
+        poss = str(item.get("possession") or "").strip()
+        pid = str(item.get("id") or "")[:8]
+        price_txt = f"₹{_as_int_price(price):,}" if price is not None and price != "" else "price on request"
+        bhk_txt = f"{int(bhk)} BHK" if bhk is not None else "BHK n/a"
+        bit = f"{idx}) {title} | {location} | {bhk_txt} | {price_txt}"
+        if poss:
+            bit += f" | possession: {poss}"
+        if pid:
+            bit += f" | id: {pid}…"
+        lines.append(bit)
+
+    lines.append(GROUNDED_REPLY_FOOTER)
+    return "\n".join(lines)
+
+
+def _format_no_matching_inventory(lead: dict[str, Any]) -> str:
+    parts = [NO_INVENTORY_INTRO]
+    if lead.get("bhk"):
+        parts.append(f"Filter: {lead['bhk']} BHK.")
+    if lead.get("location"):
+        parts.append(f"Location contains: {lead['location']}.")
+    if lead.get("budget_max_inr"):
+        parts.append(f"Budget cap: up to ₹{_as_int_price(lead['budget_max_inr']):,}.")
+    parts.append(NO_INVENTORY_OUTRO)
+    return " ".join(parts)
 
 
 def log_agent_step(
@@ -203,6 +249,7 @@ def log_agent_step(
 ) -> None:
     client = _sb()
     if client is None:
+        logger.warning("db log_agent_step skipped: Supabase not configured (step=%s)", step)
         return
 
     row = {
@@ -214,13 +261,20 @@ def log_agent_step(
     }
     try:
         client.table("agent_logs").insert(row).execute()
+        logger.info(
+            "db agent_logs insert ok step=%s channel=%s contact_id=%s",
+            step,
+            channel or row.get("channel") or "",
+            contact_id or row.get("contact_id") or "",
+        )
     except Exception as exc:  # noqa: BLE001
-        print("agent_logs insert failed:", exc)
+        logger.warning("db agent_logs insert failed: %s", exc)
 
 
 def get_lead_history(channel: str, contact_id: str) -> dict[str, Any]:
     client = _sb()
     if client is None:
+        logger.warning("db get_lead_history skipped: Supabase not configured")
         return {}
     try:
         response = (
@@ -232,10 +286,22 @@ def get_lead_history(channel: str, contact_id: str) -> dict[str, Any]:
             .execute()
         )
     except Exception as exc:  # noqa: BLE001
-        print("lead lookup failed:", exc)
+        logger.warning("db get_lead_history failed: %s", exc)
         return {}
     rows = response.data or []
-    return rows[0] if rows else {}
+    if rows:
+        row = rows[0]
+        li = row.get("lead_info") or {}
+        logger.info(
+            "db get_lead_history ok channel=%s contact_id=%s lead_id=%s lead_info_keys=%s",
+            channel,
+            contact_id,
+            row.get("id"),
+            sorted(li.keys()) if isinstance(li, dict) else [],
+        )
+        return row
+    logger.info("db get_lead_history miss channel=%s contact_id=%s (new lead)", channel, contact_id)
+    return {}
 
 
 def save_lead_context(
@@ -251,6 +317,7 @@ def save_lead_context(
 ) -> None:
     client = _sb()
     if client is None:
+        logger.warning("db save_lead_context skipped: Supabase not configured")
         return
 
     row = {
@@ -265,16 +332,30 @@ def save_lead_context(
     }
     try:
         client.table("leads").upsert(row, on_conflict="channel,contact_id").execute()
+        li = lead_info or {}
+        logger.info(
+            "db leads upsert ok channel=%s contact_id=%s lead_info_keys=%s handoff=%s",
+            channel,
+            contact_id,
+            sorted(li.keys()) if isinstance(li, dict) else [],
+            human_handoff_requested,
+        )
     except Exception as exc:  # noqa: BLE001
-        print("lead upsert failed:", exc)
+        logger.warning("db leads upsert failed: %s", exc)
 
 
-def fetch_properties(query: str, filters: dict[str, Any]) -> list[dict[str, Any]]:
+def fetch_properties(
+    _query: str,
+    filters: dict[str, Any],
+    *,
+    relax_budget: bool = False,
+) -> list[dict[str, Any]]:
     client = _sb()
     if client is None:
+        logger.warning("db fetch_properties skipped: Supabase not configured")
         return []
 
-    lead = filters.get("lead") or {}
+    lead = dict(filters.get("lead") or {})
     try:
         request = (
             client.table("properties")
@@ -283,43 +364,35 @@ def fetch_properties(query: str, filters: dict[str, Any]) -> list[dict[str, Any]
         )
         if lead.get("bhk"):
             request = request.eq("bhk", int(lead["bhk"]))
-        if lead.get("budget_max_inr"):
+        if lead.get("budget_max_inr") and not relax_budget:
             request = request.lte("price_inr", int(lead["budget_max_inr"]))
         if lead.get("location"):
             request = request.ilike("location", f"%{lead['location']}%")
         response = request.execute()
     except Exception as exc:  # noqa: BLE001
-        print("property lookup failed:", exc)
+        logger.warning("db fetch_properties failed: %s", exc)
         log_agent_step(
             lead.get("phone"),
             "tool_fetch_properties_error",
-            {"query": query, "error": str(exc)},
+            {"query": _query, "error": str(exc)},
             channel=filters.get("channel", ""),
             contact_id=filters.get("contact_id", ""),
         )
         return []
-    return response.data or []
+    data = response.data or []
+    logger.info(
+        "db fetch_properties ok rows=%s relax_budget=%s bhk=%s location=%s budget_max_inr=%s",
+        len(data),
+        relax_budget,
+        lead.get("bhk"),
+        lead.get("location"),
+        lead.get("budget_max_inr"),
+    )
+    return data
 
 
 def check_calendar_availability(_preferred_times: list[str]) -> list[str]:
     return []
-
-
-def _heuristic_triage(text: str, existing: dict[str, Any]) -> TriageDecision:
-    lowered = text.lower()
-    lead_delta = _extract_lead_delta(text, existing)
-    if any(x in lowered for x in ("human", "agent", "call me", "broker", "बात", "इंसान")):
-        return TriageDecision(
-            next_action="handoff",
-            confidence=0.4,
-            lead_delta=lead_delta,
-            human_handoff_requested=True,
-        )
-    if any(x in lowered for x in ("visit", "site visit", "देख", "मुलाकात", "schedule")):
-        return TriageDecision(next_action="suggest_visit", confidence=0.6, lead_delta=lead_delta)
-    if any(x in lowered for x in ("flat", "bhk", "property", "budget", "house", "घर", "प्रॉपर्टी")):
-        return TriageDecision(next_action="match_properties", confidence=0.55, lead_delta=lead_delta)
-    return TriageDecision(next_action="qualify", confidence=0.45, lead_delta=lead_delta)
 
 
 def triage_node(state: AgentState) -> dict[str, Any]:
@@ -332,30 +405,29 @@ def triage_node(state: AgentState) -> dict[str, Any]:
     llm = _chat()
 
     if llm is None:
-        decision = _heuristic_triage(text, existing_lead)
-        mode = "heuristic"
+        logger.warning("triage: no LLM configured (GROQ_API_KEY missing); using empty triage decision")
+        decision = _no_llm_triage_decision()
+        mode = "no_llm"
     else:
         try:
             structured = llm.with_structured_output(TriageDecision)
             decision = structured.invoke(
                 [
-                    SystemMessage(content=SYSTEM_REAL_ESTATE + " Classify the user and fill fields."),
+                    SystemMessage(content=triage_classifier_system_content()),
                     HumanMessage(
-                        content=(
-                            f"Channel: {channel}\n"
-                            f"Profile name: {state.get('profile_name') or ''}\n"
-                            f"Existing lead_info JSON: {json.dumps(existing_lead, ensure_ascii=False)}\n"
-                            f"Latest user message: {text}\n"
-                            "Return next_action, confidence, lead_delta (only new or changed keys), "
-                            "human_handoff_requested."
+                        content=triage_human_content(
+                            channel=channel,
+                            profile_name=str(state.get("profile_name") or ""),
+                            existing_lead=existing_lead,
+                            latest_user_message=text,
                         )
                     ),
                 ]
             )
             mode = "llm"
         except Exception as exc:  # noqa: BLE001
-            decision = _heuristic_triage(text, existing_lead)
-            mode = "heuristic_after_llm_error"
+            decision = _no_llm_triage_decision()
+            mode = "no_llm_after_error"
             log_agent_step(
                 phone,
                 "triage_error",
@@ -365,20 +437,43 @@ def triage_node(state: AgentState) -> dict[str, Any]:
             )
 
     lead = dict(existing_lead)
-    for key, value in (decision.lead_delta or {}).items():
-        if value is not None and value != "":
-            lead[key] = value
+    _apply_lead_delta(lead, decision.lead_delta)
+
+    next_action = decision.next_action
+    force_fetch = (
+        not decision.human_handoff_requested
+        and next_action != "match_properties"
+        and bool(decision.refresh_property_inventory)
+    )
+    if force_fetch:
+        next_action = "match_properties"
 
     properties: list[dict[str, Any]] = []
-    if decision.next_action == "match_properties":
+    budget_relaxed = False
+    if next_action == "match_properties":
         properties = fetch_properties(
             text,
             {"lead": lead, "channel": channel, "contact_id": contact_id},
         )
+        if not properties and lead.get("budget_max_inr"):
+            relaxed = fetch_properties(
+                text,
+                {"lead": lead, "channel": channel, "contact_id": contact_id},
+                relax_budget=True,
+            )
+            if relaxed:
+                properties = relaxed
+                budget_relaxed = True
         log_agent_step(
             phone,
             "tool_fetch_properties",
-            {"count": len(properties), "location": lead.get("location"), "bhk": lead.get("bhk")},
+            {
+                "count": len(properties),
+                "location": lead.get("location"),
+                "bhk": lead.get("bhk"),
+                "forced": force_fetch,
+                "budget_relaxed": budget_relaxed,
+            },
             channel=channel,
             contact_id=contact_id,
         )
@@ -386,17 +481,22 @@ def triage_node(state: AgentState) -> dict[str, Any]:
     log_agent_step(
         phone,
         "triage",
-        {"mode": mode, "decision": decision.model_dump()},
+        {"mode": mode, "decision": decision.model_dump(), "next_action_resolved": next_action},
         channel=channel,
         contact_id=contact_id,
     )
 
+    match_meta: dict[str, Any] = {}
+    if next_action == "match_properties":
+        match_meta["budget_relaxed"] = budget_relaxed
+
     return {
         "lead_info": lead,
-        "next_action": decision.next_action,
+        "next_action": next_action,
         "confidence": decision.confidence,
         "human_handoff_requested": decision.human_handoff_requested,
         "properties_matched": properties,
+        "property_match_meta": match_meta,
     }
 
 
@@ -407,11 +507,13 @@ def respond_node(state: AgentState) -> dict[str, Any]:
     slots = check_calendar_availability([])
     history = get_lead_history(channel, contact_id)
     properties = state.get("properties_matched") or []
+    pm_meta = state.get("property_match_meta") or {}
     ctx = {
         "next_action": state.get("next_action"),
         "confidence": state.get("confidence"),
         "lead_info": state.get("lead_info") or {},
         "properties_matched": properties,
+        "property_match_meta": pm_meta,
         "calendar_slots": slots,
         "human_handoff_requested": state.get("human_handoff_requested"),
         "lead_history": {
@@ -420,27 +522,42 @@ def respond_node(state: AgentState) -> dict[str, Any]:
         },
     }
 
+    if state.get("human_handoff_requested"):
+        message = HANDOFF_USER_MESSAGE
+        log_agent_step(
+            phone,
+            "respond",
+            {"mode": "handoff", "ctx": ctx},
+            channel=channel,
+            contact_id=contact_id,
+        )
+        return {"messages": [AIMessage(content=message)], "calendar_slots": slots}
+
+    if state.get("next_action") == "match_properties":
+        lead = state.get("lead_info") or {}
+        if properties:
+            message = _format_grounded_property_reply(
+                properties,
+                lead,
+                budget_relaxed=bool(pm_meta.get("budget_relaxed")),
+            )
+        else:
+            message = _format_no_matching_inventory(lead)
+        log_agent_step(
+            phone,
+            "respond",
+            {"mode": "grounded_inventory", "ctx": ctx},
+            channel=channel,
+            contact_id=contact_id,
+        )
+        return {"messages": [AIMessage(content=message)], "calendar_slots": slots}
+
     llm = _chat()
     if llm is None:
-        if state.get("human_handoff_requested"):
-            message = "I’m connecting you with a broker now. They’ll follow up shortly."
-        elif state.get("next_action") == "match_properties" and properties:
-            message = (
-                "I found a few matching options:\n"
-                f"{_format_property_preview(properties)}\n"
-                "Tell me which one you want details or a site visit for."
-            )
-        elif state.get("next_action") == "match_properties":
-            message = (
-                "I’m checking live inventory. Please confirm your preferred micro-location "
-                "and exact budget band so I can narrow the options."
-            )
-        elif state.get("next_action") == "suggest_visit":
-            message = "Please share 2 or 3 preferred time slots this week for a site visit."
+        if state.get("next_action") == "suggest_visit":
+            message = FALLBACK_NO_LLM_SUGGEST_VISIT
         else:
-            message = (
-                "Please share your budget, preferred location, BHK, and whether you want to buy or sell."
-            )
+            message = FALLBACK_NO_LLM_DEFAULT
         log_agent_step(
             phone,
             "respond",
@@ -450,13 +567,7 @@ def respond_node(state: AgentState) -> dict[str, Any]:
         )
         return {"messages": [AIMessage(content=message)], "calendar_slots": slots}
 
-    prompt = SystemMessage(
-        content=SYSTEM_REAL_ESTATE
-        + " Generate the next chat reply."
-        + " If properties_matched is empty and the user wants listings, ask one clarifying question."
-        + " If properties_matched is present, mention up to three options briefly."
-        + " If human_handoff_requested is true, confirm broker handoff."
-    )
+    prompt = SystemMessage(content=respond_system_content())
     human = HumanMessage(content="Context JSON:\n" + json.dumps(ctx, ensure_ascii=False))
     try:
         output = llm.invoke([prompt, *state.get("messages", [])[-6:], human])
@@ -477,11 +588,7 @@ def respond_node(state: AgentState) -> dict[str, Any]:
             contact_id=contact_id,
         )
         return {
-            "messages": [
-                AIMessage(
-                    content="I have your requirement. Please share your budget and preferred location so I can help."
-                )
-            ],
+            "messages": [AIMessage(content=FALLBACK_RESPOND_LLM_ERROR)],
             "calendar_slots": slots,
         }
 

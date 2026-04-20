@@ -110,3 +110,13 @@ create trigger properties_updated_at
 alter table public.leads enable row level security;
 alter table public.properties enable row level security;
 alter table public.agent_logs enable row level security;
+
+-- RLS is on with no policies → PostgREST returns 0 rows for anon/authenticated keys.
+-- Service role bypasses RLS; if you must use the anon key from the backend, these policies allow reads.
+-- Tighten policies in production as needed.
+
+drop policy if exists "properties_select_public" on public.properties;
+create policy "properties_select_public"
+  on public.properties for select
+  to anon, authenticated
+  using (true);
