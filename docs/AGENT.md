@@ -12,10 +12,10 @@
 - **Code must be kept very minimal.** No unnecessary modularization, abstractions, extra folders, or over-engineering. Only include what is strictly required for the MVP to work. Keep files small, simple, and easy to understand. Avoid creating many small modules or complex folder structures in Phase 1.
 
 ## Central Tracking Document
-**File:** `AGENT_TRACKING.md` (MUST be maintained at all times)
+**File:** `docs/AGENT_TRACKING.md` (MUST be maintained at all times)
 
 Every time Cursor / any AI coding agent makes changes, it **MUST**:
-1. Update `AGENT_TRACKING.md` with:
+1. Update `docs/AGENT_TRACKING.md` with:
    - Date & time of change
    - What was changed (file name + brief description)
    - Why it was changed
@@ -103,7 +103,7 @@ The agent is built as a **stateful LangGraph** with the following components:
 
 ## Maintenance Rules
 - Never delete old versions of prompts or graph definitions — comment them out or move to archive/
-- Every major change to the agent graph must be documented in `AGENT_TRACKING.md`
+- Every major change to the agent graph must be documented in `docs/AGENT_TRACKING.md`
 - Before deploying, run full end-to-end test flows (buyer enquiry, seller enquiry, voice note, handoff)
 
 **This file is the single source of truth for the AI Agent.**  
