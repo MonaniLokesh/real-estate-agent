@@ -1,0 +1,15 @@
+[project]
+name = "real-estate-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langgraph>=0.2.0",
+    "pydantic-settings>=2.0.0",
+    "supabase>=2.0.0",
+    "uvicorn[standard]>=0.30.0",
+]
