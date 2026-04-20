@@ -7,7 +7,7 @@
 ## Core Technical Skills Required
 
 ### 1. LangGraph & Agentic Architecture
-- Building stateful multi-agent graphs with LangGraph 0.2+
+- Building stateful multi-agent graphs with LangGraph
 - Defining nodes, edges, conditional routing, and checkpoints
 - Implementing tool calling with structured outputs
 - Memory management (short-term + long-term summarization)
@@ -64,7 +64,7 @@
 - Voice note preference in Indian market
 
 ## Development Best Practices (Must Follow)
-- All changes must be logged in `AGENT_TRACKING.md`
+- All changes must be logged in `docs/AGENT_TRACKING.md`
 - Keep prompts, system instructions, and graph definitions clean and versioned
 - Write clear docstrings and comments in code
 - Prioritize reliability over fancy features in Phase 1
@@ -72,8 +72,8 @@
 - Make the agent feel natural and helpful, never robotic
 
 ## Non-Negotiable Rules for Cursor / Any AI Agent
-1. Before making any significant change, read `AGENT.md` and `SKILLS.md` fully.
-2. After every meaningful task (new node, new tool, new screen, schema change), update `AGENT_TRACKING.md` with:
+1. Before making any significant change, read `docs/AGENT.md` and `docs/SKILLS.md` fully.
+2. After every meaningful task (new node, new tool, new screen, schema change), update `docs/AGENT_TRACKING.md` with:
    - Date/Time
    - Files changed
    - Summary of changes
@@ -84,6 +84,6 @@
 5. Keep the React Native app simple, clean, and mobile-first.
 
 ## Tracking Document Reminder
-**Central file:** `AGENT_TRACKING.md`
+**Central file:** `docs/AGENT_TRACKING.md`
 
 This file must stay up-to-date as the single history of all development decisions and changes.
