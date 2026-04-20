@@ -231,3 +231,115 @@ Reply in the user's language (Hindi/English mix is common). Be concise and helpf
 - Removed generated root `__pycache__/` after verification.
 
 ---
+
+## 2026-04-20 — ngrok Docker Compose support
+
+**Time:** Same session, local webhook setup  
+**Status:** Completed  
+
+**Files changed**
+- `docker-compose.yml` — added an `ngrok` service that tunnels to `app:8000` and exposes port `4040`.
+- `.env.example` — added `NGROK_AUTHTOKEN` and removed hardcoded example Telegram secrets.
+- `.env` — added `NGROK_AUTHTOKEN` placeholder for local compose usage.
+- `README.md` — added ngrok startup, tunnel discovery, and webhook registration instructions.
+
+**Summary**
+- Added an ngrok container so Telegram and WhatsApp webhooks can hit the local FastAPI app during development.
+- Documented the exact flow for retrieving the public tunnel URL and using it for webhook registration.
+
+**Key decisions**
+- Kept the implementation Docker-first to match the existing local stack.
+- Used the ngrok local inspector/API on `127.0.0.1:4040` as the simplest way to discover the active public URL.
+
+**Edge cases**
+- ngrok public URLs change on restart unless you use a reserved domain on your ngrok account.
+- Telegram webhook registration must be repeated whenever the ngrok URL changes.
+- WhatsApp provider verification still depends on the BSP you use; this repo now provides the reachable local endpoint only.
+
+**Testing**
+- Static configuration and documentation update only; live ngrok startup and webhook registration were not executed in this environment.
+- `docker compose config` — validated the Compose structure with the new `ngrok` service.
+
+---
+
+## 2026-04-20 — WhatsApp secret env rename
+
+**Time:** Same session, env naming cleanup  
+**Status:** Completed  
+
+**Files changed**
+- `app/core/config.py` — renamed `webhook_secret` setting to `whatsapp_webhook_secret`.
+- `app/api/routes/webhooks.py` — updated WhatsApp webhook auth to read `settings.whatsapp_webhook_secret`.
+- `.env` — renamed `WEBHOOK_SECRET` to `WHATSAPP_WEBHOOK_SECRET`.
+- `.env.example` — renamed the example variable and updated the comment.
+- `README.md` — updated the WhatsApp webhook header/env reference.
+
+**Summary**
+- Renamed the WhatsApp secret env var to make it explicit and avoid confusion with Telegram webhook auth.
+
+**Key decisions**
+- Kept the inbound HTTP header name as `X-Webhook-Secret` so external integrations do not need to change headers, only the local env variable name.
+
+**Edge cases**
+- Any existing deployment still using `WEBHOOK_SECRET` in its environment will stop authenticating WhatsApp requests until it is renamed to `WHATSAPP_WEBHOOK_SECRET`.
+
+**Testing**
+- Static rename only; verified by code search and syntax pass after the change.
+
+---
+
+## 2026-04-20 — One-time Telegram webhook registration script
+
+**Time:** Same session, webhook automation follow-up  
+**Status:** Completed  
+
+**Files changed**
+- `scripts/register_telegram_webhook.sh` (new) — starts `app` and `ngrok`, reads the active ngrok public URL, and registers Telegram via `setWebhook`.
+- `README.md` — documented the one-command Telegram webhook registration flow.
+
+**Summary**
+- Added a helper script so Telegram webhook setup does not require manually copying the ngrok URL and crafting the `curl` request each time.
+- Updated it to check the current Telegram webhook first and skip `setWebhook` if the target URL already matches.
+
+**Key decisions**
+- Used the existing Docker Compose `ngrok` service instead of starting a separate local `ngrok http 8000` process.
+- Read the public URL from ngrok’s inspector API on `127.0.0.1:4040` rather than scraping CLI logs.
+
+**Edge cases**
+- The script expects `.env` to contain both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`.
+- The script assumes Docker Compose is available locally.
+- If ngrok takes too long to start or no tunnel is available, the script exits with an error.
+- If the ngrok URL changes, the script will re-register Telegram as expected.
+
+**Testing**
+- Static script/documentation update only; live webhook registration was not executed in this environment.
+
+---
+
+## 2026-04-20 — Automatic Telegram webhook setup via Compose
+
+**Time:** Same session, Compose automation follow-up  
+**Status:** Completed  
+
+**Files changed**
+- `docker-compose.yml` — added `telegram-webhook-setup` one-shot service.
+- `scripts/register_telegram_webhook.sh` — made the script reusable both locally and inside Docker via `START_DEPENDENCIES` and `NGROK_API_URL`.
+- `README.md` — documented that `docker compose up` now runs Telegram webhook setup automatically.
+
+**Summary**
+- Added a one-shot Compose service that registers the Telegram webhook automatically whenever the local stack starts.
+- Reused the existing script instead of duplicating webhook registration logic.
+
+**Key decisions**
+- Used `curlimages/curl` as a minimal runtime for the one-shot setup container.
+- Mounted the repository read-only and reused `.env` plus the existing shell script to keep behavior consistent between local and Compose execution.
+
+**Edge cases**
+- The one-shot setup container exits after completing its work; this is expected.
+- If ngrok has not produced a public URL yet, the setup container retries for a short period and then exits with an error.
+- If the current Telegram webhook already matches the ngrok URL, the setup container exits successfully without changing anything.
+
+**Testing**
+- `docker compose config` — validated the Compose structure with the `telegram-webhook-setup` one-shot service.
+
+---

@@ -34,7 +34,11 @@ async def whatsapp_webhook(
     x_webhook_secret: Optional[str] = Header(default=None, alias="X-Webhook-Secret"),
 ):
     settings = get_settings()
-    _require_secret(settings.webhook_secret, x_webhook_secret, "invalid webhook secret")
+    _require_secret(
+        settings.whatsapp_webhook_secret,
+        x_webhook_secret,
+        "invalid webhook secret",
+    )
     body = await _parse_json(request)
     inbound = extract_whatsapp_message(body)
     log_agent_step(

@@ -9,3 +9,37 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: real-estate-agent-ngrok
+    depends_on:
+      - app
+    env_file:
+      - .env
+    command:
+      - "http"
+      - "app:8000"
+      - "--log=stdout"
+    ports:
+      - "4040:4040"
+    restart: unless-stopped
+
+  telegram-webhook-setup:
+    image: curlimages/curl:8.8.0
+    container_name: real-estate-agent-telegram-webhook-setup
+    depends_on:
+      - app
+      - ngrok
+    working_dir: /work
+    env_file:
+      - .env
+    environment:
+      START_DEPENDENCIES: "0"
+      NGROK_API_URL: "http://ngrok:4040/api/tunnels"
+    volumes:
+      - .:/work:ro
+    command:
+      - "sh"
+      - "/work/scripts/register_telegram_webhook.sh"
+    restart: "no"
