@@ -27,7 +27,7 @@ docker compose up --build
 That now starts:
 - the FastAPI app
 - ngrok
-- a one-shot `telegram-webhook-setup` container that registers Telegram automatically if the webhook URL changed
+- automatic startup logic in the app container that can apply `db/schema.sql` and register Telegram automatically
 
 Health check:
 
@@ -71,14 +71,30 @@ curl http://127.0.0.1:4040/api/tunnels
 - WhatsApp: `<public_url>/webhooks/whatsapp`
 
 The local ngrok inspector UI is also available at `http://127.0.0.1:4040`.
+Telegram webhook registration now happens automatically from [`entrypoint.sh`](/Users/dilkushsingh/Desktop/Projects/learning/real-estate-agent/entrypoint.sh:1) when the app container starts, as long as both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` are present in `.env`.
 
-If you want to register Telegram in one step, run:
+## Startup Automation
 
-```bash
-sh scripts/register_telegram_webhook.sh
+[`entrypoint.sh`](/Users/dilkushsingh/Desktop/Projects/learning/real-estate-agent/entrypoint.sh:1) runs inside the app container and supports:
+
+- optional database schema apply from [`db/schema.sql`](/Users/dilkushsingh/Desktop/Projects/learning/real-estate-agent/db/schema.sql:1)
+- automatic Telegram webhook registration against the current ngrok URL
+
+Relevant env vars:
+
+```env
+SUPABASE_DB_URL=
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_WEBHOOK_SECRET=
 ```
 
-That script starts `app` and `ngrok`, reads the current public URL from ngrok’s local API, checks Telegram’s current webhook, and only calls `setWebhook` when the target URL has changed. The same script is also used automatically by the `telegram-webhook-setup` Compose service during `docker compose up`.
+Behavior:
+
+- If `SUPABASE_DB_URL` is present, the container applies [`db/schema.sql`](/Users/dilkushsingh/Desktop/Projects/learning/real-estate-agent/db/schema.sql:1) on startup.
+- If `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` are present, the container auto-registers Telegram against the current ngrok URL.
+- If those env vars are missing, the related step is skipped.
+
+Use a direct Postgres connection string for `SUPABASE_DB_URL`, not the Supabase REST URL.
 
 ## Webhooks
 
@@ -95,7 +111,7 @@ That script starts `app` and `ngrok`, reads the current public URL from ngrok’
 - Requires `TELEGRAM_BOT_TOKEN`
 - The app replies directly using Telegram Bot API `sendMessage`
 
-Register Telegram against the current ngrok URL:
+Register Telegram manually against the current ngrok URL:
 
 ```bash
 curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
