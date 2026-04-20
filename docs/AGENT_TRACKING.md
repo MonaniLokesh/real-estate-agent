@@ -343,3 +343,61 @@ Reply in the user's language (Hindi/English mix is common). Be concise and helpf
 - `docker compose config` — validated the Compose structure with the `telegram-webhook-setup` one-shot service.
 
 ---
+
+## 2026-04-20 — Consolidated container startup entrypoint
+
+**Time:** Same session, startup consolidation  
+**Status:** Completed  
+
+**Files changed**
+- `entrypoint.sh` (new) — app container startup logic for optional DB migrations, app boot, health wait, and Telegram webhook registration.
+- `Dockerfile` — installs `curl` and `postgresql-client`, makes `entrypoint.sh` executable, and uses it as the container entrypoint.
+- `docker-compose.yml` — removed the separate `telegram-webhook-setup` service and passed `NGROK_API_URL` into the app container.
+- `.env.example` — added `SUPABASE_DB_URL`, `RUN_DB_MIGRATIONS`, and `AUTO_REGISTER_TELEGRAM_WEBHOOK`.
+- `README.md` — updated startup docs to describe the new entrypoint-based flow.
+- Removed `scripts/register_telegram_webhook.sh` because its logic now lives in `entrypoint.sh`.
+
+**Summary**
+- Moved startup-time automation into the app container so `docker compose up` handles DB schema apply and Telegram webhook registration from one place.
+- Simplified Compose by removing the extra one-shot service.
+
+**Key decisions**
+- Added an optional direct Postgres connection string (`SUPABASE_DB_URL`) because Supabase DDL migrations need SQL access, not only the REST/service-role client used by the app.
+- Kept DB migrations opt-in with `RUN_DB_MIGRATIONS=0` by default to avoid accidental schema changes on every startup.
+- Kept Telegram webhook auto-registration enabled by default because it is idempotent and useful in local ngrok development.
+
+**Edge cases**
+- `RUN_DB_MIGRATIONS=1` without `SUPABASE_DB_URL` now causes container startup to fail fast.
+- If ngrok is slow to produce a public URL, the entrypoint waits briefly and then fails the container startup.
+- If Telegram webhook credentials are missing, webhook registration is skipped without blocking app startup.
+
+**Testing**
+- `sh -n entrypoint.sh` — shell syntax check passed.
+- `docker compose config` — validated the consolidated startup flow with the app entrypoint and ngrok service.
+
+---
+
+## 2026-04-20 — Removed startup flags
+
+**Time:** Same session, startup simplification  
+**Status:** Completed  
+
+**Files changed**
+- `entrypoint.sh` — removed `RUN_DB_MIGRATIONS` and `AUTO_REGISTER_TELEGRAM_WEBHOOK` flag checks.
+- `.env.example` — removed the two flags from example config.
+- `README.md` — updated startup docs to describe env-presence-driven behavior.
+
+**Summary**
+- Simplified startup so migrations run when `SUPABASE_DB_URL` exists, and Telegram registration runs when the Telegram credentials exist.
+
+**Key decisions**
+- Switched from boolean flags to presence-based behavior to reduce config clutter for the normal local workflow.
+
+**Edge cases**
+- If `SUPABASE_DB_URL` is set, migrations run on every container start; the schema file therefore needs to remain idempotent.
+- If Telegram credentials are present but ngrok is unavailable, webhook registration still fails startup after the retry window.
+
+**Testing**
+- Pending shell syntax and Compose validation after flag removal.
+
+---
