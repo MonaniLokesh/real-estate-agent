@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_service_role_key: str = ""
 
-    webhook_secret: str = ""
+    whatsapp_webhook_secret: str = ""
     allow_debug: bool = False
 
     telegram_bot_token: str = ""
