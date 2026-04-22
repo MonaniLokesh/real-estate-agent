@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from app.core.config import get_settings
-from app.services.agent import log_agent_step, run_turn
+from app.services.agent import run_turn
 from app.services.channels import (
     extract_telegram_message,
     extract_whatsapp_message,
@@ -14,6 +15,7 @@ from app.services.channels import (
 )
 
 router = APIRouter(tags=["webhooks"])
+_log = logging.getLogger(__name__)
 
 
 def _require_secret(expected: str, received: Optional[str], detail: str) -> None:
@@ -41,12 +43,10 @@ async def whatsapp_webhook(
     )
     body = await _parse_json(request)
     inbound = extract_whatsapp_message(body)
-    log_agent_step(
-        inbound.phone if inbound else "",
-        "webhook_received",
-        {"keys": list(body.keys())[:40]},
-        channel="whatsapp",
-        contact_id=inbound.contact_id if inbound else "",
+    _log.info(
+        "whatsapp_webhook_received keys=%s contact_id=%s",
+        list(body.keys())[:40],
+        inbound.contact_id if inbound else "",
     )
 
     if inbound is None or not inbound.text:
@@ -60,13 +60,7 @@ async def whatsapp_webhook(
         profile_name=inbound.profile_name,
         user_text=inbound.text,
     )
-    log_agent_step(
-        inbound.phone,
-        "webhook_reply",
-        {"preview": reply[:200]},
-        channel=inbound.channel,
-        contact_id=inbound.contact_id,
-    )
+    _log.info("whatsapp_webhook_reply preview=%s", reply[:200])
     return {"ok": True, "reply": reply, "phone": inbound.phone}
 
 
@@ -86,12 +80,10 @@ async def telegram_webhook(
     )
     body = await _parse_json(request)
     inbound = extract_telegram_message(body)
-    log_agent_step(
-        "",
-        "telegram_webhook_received",
-        {"keys": list(body.keys())[:40]},
-        channel="telegram",
-        contact_id=inbound.contact_id if inbound else "",
+    _log.info(
+        "telegram_webhook_received keys=%s contact_id=%s",
+        list(body.keys())[:40],
+        inbound.contact_id if inbound else "",
     )
 
     if inbound is None or not inbound.text:
@@ -105,12 +97,10 @@ async def telegram_webhook(
         user_text=inbound.text,
     )
     telegram_response = send_telegram_message(settings, inbound.chat_id, reply)
-    log_agent_step(
-        "",
-        "telegram_webhook_reply",
-        {"preview": reply[:200], "telegram_ok": telegram_response.get("ok")},
-        channel=inbound.channel,
-        contact_id=inbound.contact_id,
+    _log.info(
+        "telegram_webhook_reply preview=%s telegram_ok=%s",
+        reply[:200],
+        telegram_response.get("ok"),
     )
     return {"ok": True, "reply": reply, "chat_id": inbound.chat_id}
 
