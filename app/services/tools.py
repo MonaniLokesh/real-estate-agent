@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Any
 
+from httpx import TimeoutException
 from langchain_core.tools import tool
 
 from app.core.config import get_settings
@@ -13,17 +14,44 @@ logger = logging.getLogger(__name__)
 _supabase = None
 
 
+class SupabaseTimeoutError(RuntimeError):
+    """Raised when a Supabase request exceeds configured timeout."""
+
+
+class SupabaseQueryError(RuntimeError):
+    """Raised for non-timeout Supabase request failures."""
+
+
 def get_supabase_client():
     global _supabase
     if _supabase is not None:
         return _supabase
     settings = get_settings()
-    if not settings.supabase_url or not settings.supabase_service_role_key:
+    supabase_url = (settings.supabase_url or "").strip()
+    service_role_key = (settings.supabase_service_role_key or "").strip()
+    if not supabase_url or not service_role_key:
         return None
-    from supabase import create_client
+    from supabase import ClientOptions, create_client
 
-    _supabase = create_client(settings.supabase_url, settings.supabase_service_role_key)
+    options = ClientOptions(
+        postgrest_client_timeout=10,
+        storage_client_timeout=10,
+        function_client_timeout=10,
+        auto_refresh_token=False,
+        persist_session=False,
+    )
+    _supabase = create_client(supabase_url, service_role_key, options=options)
     return _supabase
+
+
+def execute_supabase_query(query, operation: str):
+    """Execute a Supabase query and convert low-level failures."""
+    try:
+        return query.execute()
+    except TimeoutException as exc:
+        raise SupabaseTimeoutError(f"supabase timeout during {operation}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise SupabaseQueryError(f"supabase error during {operation}: {exc}") from exc
 
 
 @tool
@@ -34,11 +62,11 @@ def get_all_properties() -> str:
         logger.warning("get_all_properties: Supabase not configured")
         return "[]"
     try:
-        response = (
+        response = execute_supabase_query(
             client.table("properties")
             .select("id,title,description,price_inr,location,bhk,possession,metadata")
-            .limit(50)
-            .execute()
+            .limit(50),
+            operation="get_all_properties",
         )
     except Exception as exc: 
         logger.warning("get_all_properties failed: %s", exc)

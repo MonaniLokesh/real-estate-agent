@@ -401,3 +401,38 @@ Reply in the user's language (Hindi/English mix is common). Be concise and helpf
 - Pending shell syntax and Compose validation after flag removal.
 
 ---
+
+## 2026-04-25 — Broker REST APIs for mobile app
+
+**Time:** Afternoon session  
+**Status:** Completed  
+
+**Files changed**
+- `app/api/routes/properties.py` (new) — CRUD + image upload endpoints for broker property management.
+- `app/api/routes/leads.py` (new) — leads list, stage update, and broker action log endpoints.
+- `app/api/routes/dashboard.py` (new) — summary metrics endpoint for listings, leads, and revenue estimate.
+- `app/schemas/properties.py` (new) — property metadata/payload/response Pydantic models.
+- `app/schemas/leads.py` (new) — lead response + stage update payload models.
+- `app/schemas/__init__.py` (new) — schema exports.
+- `app/main.py` — registered new routers and added permissive CORS middleware.
+- `.env.example` — added `SUPABASE_SERVICE_KEY` example entry.
+
+**Summary**
+- Added broker-facing REST APIs under `/properties`, `/leads`, and `/dashboard` without modifying webhook handling logic.
+- Reused the existing shared Supabase client getter from `app/services/tools.py` in all new routes.
+- Implemented property image upload to Supabase Storage bucket `property-images` and returned public URLs.
+
+**Key decisions**
+- Kept existing webhook routes intact and only extended app router registration.
+- Preserved snake_case column names and avoided writing the `embedding` column from broker APIs.
+- Used JSON object updates for `metadata` and `lead_info` handling consistent with current table design.
+
+**Edge cases**
+- Endpoints return 404 for missing `properties`/`leads` IDs.
+- API returns a 500 when Supabase credentials are not configured.
+- Revenue estimate ignores rows where `price_inr` or `metadata.commission_rate` is missing.
+
+**Testing**
+- Static validation and syntax checks only in this session.
+
+---
