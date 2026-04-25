@@ -1,12 +1,12 @@
 # EstateAgent AI
 
-Minimal FastAPI + LangGraph backend for a real-estate sales assistant that now supports both WhatsApp and Telegram on the same agent core.
+Minimal FastAPI + LangGraph backend for a real-estate sales assistant using Twilio WhatsApp Sandbox on a shared agent core.
 
 ## What Changed
 
-- Shared agent flow for `whatsapp` and `telegram`
+- Shared agent flow for `whatsapp` via Twilio
 - Channel-aware lead persistence in Supabase
-- Telegram webhook + Bot API reply support
+- Twilio webhook parsing + WhatsApp API reply support
 - Property lookup grounded in `properties` table filters
 - Lightweight conversation summary saved back to `leads`
 
@@ -27,7 +27,7 @@ docker compose up --build
 That now starts:
 - the FastAPI app
 - ngrok
-- automatic startup logic in the app container that can apply `db/schema.sql` and register Telegram automatically
+- automatic startup logic in the app container that can apply `db/schema.sql`
 
 Health check:
 
@@ -40,7 +40,7 @@ Local dry run:
 ```bash
 curl -X POST http://127.0.0.1:8000/debug/run \
   -H 'Content-Type: application/json' \
-  -d '{"channel":"telegram","contact_id":"123","chat_id":"123","text":"2 BHK in Noida under 80 lakh"}'
+  -d '{"channel":"whatsapp","contact_id":"whatsapp:+911234567890","text":"2 BHK in Noida under 80 lakh"}'
 ```
 
 ## ngrok
@@ -67,65 +67,44 @@ curl http://127.0.0.1:4040/api/tunnels
 
 4. Use the returned `public_url` as the base for your webhooks:
 
-- Telegram: `<public_url>/webhooks/telegram`
-- WhatsApp: `<public_url>/webhooks/whatsapp`
+- Twilio WhatsApp: `<public_url>/webhooks/twilio/whatsapp`
 
 The local ngrok inspector UI is also available at `http://127.0.0.1:4040`.
-Telegram webhook registration now happens automatically from [`entrypoint.sh`](/Users/dilkushsingh/Desktop/Projects/learning/real-estate-agent/entrypoint.sh:1) when the app container starts, as long as both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` are present in `.env`.
 
 ## Startup Automation
 
 [`entrypoint.sh`](/Users/dilkushsingh/Desktop/Projects/learning/real-estate-agent/entrypoint.sh:1) runs inside the app container and supports:
 
 - optional database schema apply from [`db/schema.sql`](/Users/dilkushsingh/Desktop/Projects/learning/real-estate-agent/db/schema.sql:1)
-- automatic Telegram webhook registration against the current ngrok URL
+- a startup reminder comment for manual Twilio sandbox webhook configuration
 
 Relevant env vars:
 
 ```env
 SUPABASE_DB_URL=
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_WEBHOOK_SECRET=
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
 ```
 
 Behavior:
 
 - If `SUPABASE_DB_URL` is present, the container applies [`db/schema.sql`](/Users/dilkushsingh/Desktop/Projects/learning/real-estate-agent/db/schema.sql:1) on startup.
-- If `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` are present, the container auto-registers Telegram against the current ngrok URL.
-- If those env vars are missing, the related step is skipped.
 
 Use a direct Postgres connection string for `SUPABASE_DB_URL`, not the Supabase REST URL.
 
 ## Webhooks
 
-### WhatsApp
+### Twilio WhatsApp Sandbox
 
-- `POST /webhooks/whatsapp`
-- Optional header: `X-Webhook-Secret: <WHATSAPP_WEBHOOK_SECRET>`
-- Current behavior returns the generated reply in JSON so you can connect your BSP sender separately.
+- `POST /webhooks/twilio/whatsapp`
+- Twilio sends `application/x-www-form-urlencoded` payloads
+- The app sends reply messages through Twilio REST API
 
-### Telegram
-
-- `POST /webhooks/telegram`
-- Optional header: `X-Telegram-Bot-Api-Secret-Token: <TELEGRAM_WEBHOOK_SECRET>`
-- Requires `TELEGRAM_BOT_TOKEN`
-- The app replies directly using Telegram Bot API `sendMessage`
-
-Register Telegram manually against the current ngrok URL:
-
-```bash
-curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "<public_url>/webhooks/telegram",
-    "secret_token": "<TELEGRAM_WEBHOOK_SECRET>"
-  }'
-```
-
-For WhatsApp, configure your provider webhook target as:
+Configure Twilio sandbox webhook target as:
 
 ```text
-<public_url>/webhooks/whatsapp
+<public_url>/webhooks/twilio/whatsapp
 ```
 
 ## Database

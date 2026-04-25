@@ -22,9 +22,9 @@ class Settings(BaseSettings):
     whatsapp_webhook_secret: str = ""
     allow_debug: bool = False
 
-    telegram_bot_token: str = ""
-    telegram_webhook_secret: str = ""
-    telegram_api_base: str = "https://api.telegram.org"
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_whatsapp_from: str = ""
 
 
 @lru_cache
