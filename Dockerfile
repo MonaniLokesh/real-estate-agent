@@ -20,7 +20,8 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY . .
 
-RUN chmod +x /app/entrypoint.sh
+# Strip Windows CRLF so the shebang works under Linux (avoids "no such file or directory").
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 EXPOSE 8000
 

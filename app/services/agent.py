@@ -4,12 +4,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_groq import ChatGroq
+from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from app.core.config import get_settings
 from app.services.prompt import FALLBACK_LLM_ERROR, FALLBACK_NO_LLM, SYSTEM_PROMPT
-from app.services.tools import get_all_properties
+from app.services.tools import get_all_properties, run_property_sql
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +21,35 @@ def create_agent() -> Any | None:
     if not settings.groq_api_key:
         return None
 
-    llm = ChatOpenAI(
-        model=settings.groq_model,
-        api_key=settings.groq_api_key,
-        base_url=settings.groq_base_url,
+    model_name = settings.groq_model
+    # Some lightweight models occasionally emit malformed tool-call payloads
+    # (e.g., null tool args), which breaks tool parsers before trace is produced.
+    if model_name == "llama-3.1-8b-instant":
+        logger.warning("switching tool-calling model from %s to llama-3.3-70b-versatile", model_name)
+        model_name = "llama-3.3-70b-versatile"
+
+    llm = ChatGroq(
+        model=model_name,
         temperature=settings.groq_temperature,
+        api_key=settings.groq_api_key,
     )
-    tools = [get_all_properties]
-    return create_react_agent(model=llm, tools=tools, prompt=SYSTEM_PROMPT)
+    tools = [run_property_sql, get_all_properties]
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            SystemMessage(content=SYSTEM_PROMPT),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{input}"),
+            MessagesPlaceholder(variable_name="agent_scratchpad"),
+        ]
+    )
+    agent = create_tool_calling_agent(llm=llm, tools=tools, prompt=prompt)
+    return AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=True,
+        handle_parsing_errors=True,
+        return_intermediate_steps=True,
+    )
 
 
 def run_turn(
@@ -37,6 +60,7 @@ def run_turn(
     chat_id: str = "",
     phone: str = "",
     profile_name: str = "",
+    chat_history: list[BaseMessage] | None = None,
 ) -> str:
     _ = channel, contact_id, chat_id, phone, profile_name
     agent = create_agent()
@@ -45,23 +69,10 @@ def run_turn(
         return FALLBACK_NO_LLM
 
     try:
-        result = agent.invoke({"messages": [{"role": "user", "content": user_text}]})
-        messages = result.get("messages", [])
-
-        for message in reversed(messages):
-            content = getattr(message, "content", "")
-            if isinstance(content, str) and content.strip():
-                return content.strip()
-            if isinstance(content, list):
-                parts = [
-                    str(block.get("text", ""))
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                ]
-                text = "\n".join(parts).strip()
-                if text:
-                    return text
-
+        result = agent.invoke({"input": user_text, "chat_history": chat_history or []})
+        output = result.get("output", "")
+        if isinstance(output, str) and output.strip():
+            return output.strip()
         return FALLBACK_LLM_ERROR
     except Exception as exc:  # noqa: BLE001
         logger.exception("run_turn failed: %s", exc)

@@ -18,6 +18,10 @@ class Settings(BaseSettings):
 
     supabase_url: str = ""
     supabase_service_role_key: str = ""
+    # Optional direct Postgres URL (e.g. Supabase "Connection string" URI) for agent SQL reads.
+    # database_url: str = ""
+    # Optional pooler URL; preferred fallback for containerized environments.
+    supabase_db_url: str = ""
 
     whatsapp_webhook_secret: str = ""
     allow_debug: bool = False
